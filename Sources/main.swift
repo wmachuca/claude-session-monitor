@@ -102,6 +102,7 @@ let STRINGS: [String: [Lang: String]] = [
     "usage_header": [.en: "ACCOUNT USAGE", .es: "USO DE LA CUENTA", .pt: "USO DA CONTA"],
     "usage_5h": [.en: "5 h", .es: "5 h", .pt: "5 h"],
     "usage_week": [.en: "Week", .es: "Semana", .pt: "Semana"],
+    "usage_plan": [.en: "Plan", .es: "Plan", .pt: "Plano"],
     "about_version": [.en: "Version 1.0", .es: "Versión 1.0", .pt: "Versão 1.0"],
     "about_desc": [.en: "Menu-bar monitor for your Claude Code sessions: context used, live agents with time and tokens, trend and state. Reads local data from ~/.claude; no network.", .es: "Monitor de barra de menús para las sesiones de Claude Code: contexto usado, agentes en vivo con su tiempo y tokens, tendencia y estado. Lee datos locales de ~/.claude; no usa la red.", .pt: "Monitor de barra de menus para as sessões do Claude Code: contexto usado, agentes ao vivo com tempo e tokens, tendência e estado. Lê dados locais de ~/.claude; sem rede."],
     "about_author": [.en: "by Wilmer Machuca", .es: "por Wilmer Machuca", .pt: "por Wilmer Machuca"],
@@ -337,6 +338,7 @@ struct Session {
         }
     }
     func isActive(_ c: Config) -> Bool {
+        if !alive { return false }                                        // proceso muerto => no puede estar activa
         if busy == true { return true }                                   // procesando ahora
         return Date().timeIntervalSince(mtime) <= c.activeWindowSeconds   // o usada hace poco
     }
@@ -1177,6 +1179,26 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     }
 }
 
+/// Cabecera de la sección de uso: "USO DE LA CUENTA" a la izquierda, "Plan: XXX" a la derecha.
+final class UsageHeaderView: NSView {
+    private let plan: String
+    init(plan: String) {
+        self.plan = plan
+        super.init(frame: NSRect(x: 0, y: 0, width: 372, height: 22))
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override func draw(_ dirtyRect: NSRect) {
+        let sec = NSColor.secondaryLabelColor
+        let f = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        let midY = bounds.midY
+        drawText(L("usage_header"), NSRect(x: 16, y: midY - 9, width: 220, height: 18), color: sec, font: f)
+        if !plan.isEmpty {
+            drawText("\(L("usage_plan")): \(plan)", NSRect(x: bounds.width - 170, y: midY - 9, width: 150, height: 18),
+                     color: sec, font: f, align: .right)
+        }
+    }
+}
+
 /// Barra de uso de la cuenta: etiqueta + barra real coloreada + % + tiempo hasta el reset.
 final class UsageBarView: NSView {
     private let title: String
@@ -1188,6 +1210,8 @@ final class UsageBarView: NSView {
     }
     required init?(coder: NSCoder) { fatalError() }
 
+    func tick() { needsDisplay = true }   // actualiza la cuenta regresiva en vivo
+
     override func draw(_ dirtyRect: NSRect) {
         let hl = enclosingMenuItem?.isHighlighted ?? false
         drawHighlight(bounds, hl)
@@ -1197,17 +1221,17 @@ final class UsageBarView: NSView {
         let color = usageColor(pct)
 
         drawText(title, NSRect(x: 16, y: midY - 9, width: 64, height: 18), color: txt, font: .systemFont(ofSize: 12, weight: .medium))
-        let bar = NSRect(x: 84, y: midY - 4, width: 150, height: 7)
+        let bar = NSRect(x: 84, y: midY - 4, width: 142, height: 7)
         (hl ? NSColor.white.withAlphaComponent(0.25) : NSColor.quaternaryLabelColor).setFill()
         NSBezierPath(roundedRect: bar, xRadius: 3.5, yRadius: 3.5).fill()
         let w = max(4, bar.width * CGFloat(min(1, pct / 100)))
         color.setFill()
         NSBezierPath(roundedRect: NSRect(x: bar.minX, y: bar.minY, width: w, height: bar.height), xRadius: 3.5, yRadius: 3.5).fill()
 
-        drawText(String(format: "%.0f%%", pct), NSRect(x: 240, y: midY - 9, width: 40, height: 18),
+        drawText(String(format: "%.0f%%", pct), NSRect(x: 232, y: midY - 9, width: 42, height: 18),
                  color: txt, font: .monospacedDigitSystemFont(ofSize: 12, weight: .regular), align: .right)
         if let reset = reset, reset.timeIntervalSinceNow > 0 {
-            drawText("↻ \(formatDuration(reset.timeIntervalSinceNow))", NSRect(x: 286, y: midY - 9, width: 80, height: 18),
+            drawText("↻ \(formatDuration(reset.timeIntervalSinceNow))", NSRect(x: 280, y: midY - 9, width: 72, height: 18),
                      color: sec, font: .systemFont(ofSize: 11), align: .right)
         }
     }
@@ -1223,6 +1247,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var menuOpen = false
     private var tickTimer: Timer?
     private var agentViews: [AgentRowView] = []
+    private var usageViews: [UsageBarView] = []
     private var lastSessions: [Session] = []   // último snapshot (para abrir el menú al instante)
     private var scanning = false               // evita escaneos solapados
     private var usage: UsageInfo?              // uso de la cuenta (cacheado)
@@ -1315,22 +1340,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.autoenablesItems = false
         menu.removeAllItems()
         agentViews.removeAll()
+        usageViews.removeAll()
 
         let visible = sessions.filter { !$0.hidden }
         let hiddenOnes = sessions.filter { $0.hidden }
 
         // sección de uso de la cuenta (5h / semanal)
         if store.config.showUsage, let u = usage {
-            let uh = NSMenuItem(title: L("usage_header"), action: nil, keyEquivalent: "")
-            uh.isEnabled = false
-            let plan = (u.plan ?? "").uppercased()
-            uh.attributedTitle = NSAttributedString(string: plan.isEmpty ? L("usage_header") : "\(L("usage_header"))  ·  \(plan)", attributes: [
-                .font: NSFont.systemFont(ofSize: 11, weight: .semibold), .foregroundColor: NSColor.secondaryLabelColor])
+            let uh = NSMenuItem(); uh.isEnabled = false
+            uh.view = UsageHeaderView(plan: (u.plan ?? "").uppercased())
             menu.addItem(uh)
-            let b5 = NSMenuItem(); b5.view = UsageBarView(title: L("usage_5h"), pct: u.fiveHourPct, reset: u.fiveHourReset); b5.isEnabled = true
-            menu.addItem(b5)
-            let bw = NSMenuItem(); bw.view = UsageBarView(title: L("usage_week"), pct: u.weekPct, reset: u.weekReset); bw.isEnabled = true
-            menu.addItem(bw)
+            let v5 = UsageBarView(title: L("usage_5h"), pct: u.fiveHourPct, reset: u.fiveHourReset)
+            let vw = UsageBarView(title: L("usage_week"), pct: u.weekPct, reset: u.weekReset)
+            usageViews = [v5, vw]
+            let b5 = NSMenuItem(); b5.view = v5; b5.isEnabled = true; menu.addItem(b5)
+            let bw = NSMenuItem(); bw.view = vw; bw.isEnabled = true; menu.addItem(bw)
             menu.addItem(.separator())
         }
 
@@ -1679,7 +1703,10 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
     }
 
-    @objc private func manualRefresh() { refresh() }
+    @objc private func manualRefresh() {
+        lastUsageFetch = .distantPast   // fuerza re-consultar el uso ya (normalmente limitado a cada 60s)
+        refresh()
+    }
     @objc private func openConfig() {
         if prefs == nil {
             prefs = PreferencesWindowController(
@@ -1706,6 +1733,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         tickTimer?.invalidate()
         let t = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
             self?.agentViews.forEach { $0.tick() }
+            self?.usageViews.forEach { $0.tick() }
         }
         RunLoop.main.add(t, forMode: .common)
         tickTimer = t
