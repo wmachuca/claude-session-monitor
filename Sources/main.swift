@@ -98,6 +98,10 @@ let STRINGS: [String: [Lang: String]] = [
     "pref_push": [.en: "Send changes to Claude Code (types /color · /rename · experimental)", .es: "Enviar cambios a Claude Code (teclea /color · /rename · experimental)", .pt: "Enviar alterações ao Claude Code (digita /color · /rename · experimental)"],
     "pref_reset": [.en: "Reset to defaults", .es: "Restablecer valores por defecto", .pt: "Restaurar padrões"],
     "pref_login": [.en: "Launch at login", .es: "Iniciar al arrancar el equipo", .pt: "Iniciar ao ligar o computador"],
+    "pref_usage": [.en: "Show account usage (5h / weekly)", .es: "Mostrar uso de la cuenta (5h / semanal)", .pt: "Mostrar uso da conta (5h / semanal)"],
+    "usage_header": [.en: "ACCOUNT USAGE", .es: "USO DE LA CUENTA", .pt: "USO DA CONTA"],
+    "usage_5h": [.en: "5 h", .es: "5 h", .pt: "5 h"],
+    "usage_week": [.en: "Week", .es: "Semana", .pt: "Semana"],
     "about_version": [.en: "Version 1.0", .es: "Versión 1.0", .pt: "Versão 1.0"],
     "about_desc": [.en: "Menu-bar monitor for your Claude Code sessions: context used, live agents with time and tokens, trend and state. Reads local data from ~/.claude; no network.", .es: "Monitor de barra de menús para las sesiones de Claude Code: contexto usado, agentes en vivo con su tiempo y tokens, tendencia y estado. Lee datos locales de ~/.claude; no usa la red.", .pt: "Monitor de barra de menus para as sessões do Claude Code: contexto usado, agentes ao vivo com tempo e tokens, tendência e estado. Lê dados locais de ~/.claude; sem rede."],
     "about_author": [.en: "by Wilmer Machuca", .es: "por Wilmer Machuca", .pt: "por Wilmer Machuca"],
@@ -146,6 +150,7 @@ struct Config: Codable {
     var showBranch: Bool = true                // muestra (rama) en la línea
     var showCurrentTask: Bool = true           // muestra la tarea in_progress
     var pushToClaude: Bool = true              // refleja cambios de color en Claude (teclea /color)
+    var showUsage: Bool = true                 // muestra uso de la cuenta (5h/semanal) vía /api/oauth/usage
     var language: String = "system"            // "system" | "en" | "es" | "pt"
     var overrides: [String: SessionOverride] = [:]   // ajustes por sesión (clave = sessionId)
 
@@ -169,6 +174,7 @@ struct Config: Codable {
         showBranch          = (try? c?.decode(Bool.self,   forKey: .showBranch))          ?? def.showBranch
         showCurrentTask     = (try? c?.decode(Bool.self,   forKey: .showCurrentTask))     ?? def.showCurrentTask
         pushToClaude        = (try? c?.decode(Bool.self,   forKey: .pushToClaude))        ?? def.pushToClaude
+        showUsage           = (try? c?.decode(Bool.self,   forKey: .showUsage))           ?? def.showUsage
         language            = (try? c?.decode(String.self, forKey: .language))            ?? def.language
         overrides           = (try? c?.decode([String: SessionOverride].self, forKey: .overrides)) ?? def.overrides
     }
@@ -268,6 +274,7 @@ func parseTS(_ s: String?) -> Date? {
 /// "10m 2s", "1h 04m", "45s"
 func formatDuration(_ seconds: Double) -> String {
     let s = max(0, Int(seconds))
+    if s >= 86400 { return "\(s / 86400)d \((s % 86400) / 3600)h" }
     if s >= 3600 { return String(format: "%dh %02dm", s / 3600, (s % 3600) / 60) }
     if s >= 60   { return String(format: "%dm %02ds", s / 60, s % 60) }
     return "\(s)s"
@@ -372,6 +379,57 @@ final class History {
             let i = min(blocks.count - 1, max(0, Int(((v - lo) / span) * Double(blocks.count - 1))))
             return blocks[i]
         })
+    }
+}
+
+// MARK: - Uso de la cuenta (/api/oauth/usage)
+
+struct UsageInfo {
+    let fiveHourPct: Double
+    let fiveHourReset: Date?
+    let weekPct: Double
+    let weekReset: Date?
+    let plan: String?
+}
+
+/// Color por nivel de uso: verde bajo, amarillo medio, rojo cerca del límite.
+func usageColor(_ pct: Double) -> NSColor {
+    if pct < 60 { return .systemGreen }
+    if pct < 85 { return .systemYellow }
+    return .systemRed
+}
+
+enum Usage {
+    /// Lee el token OAuth del Keychain (el mismo de Claude Code) y consulta /api/oauth/usage.
+    static func fetch(completion: @escaping (UsageInfo?) -> Void) {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/security")
+        p.arguments = ["find-generic-password", "-s", "Claude Code-credentials", "-w"]
+        let out = Pipe(); p.standardOutput = out; p.standardError = Pipe()
+        try? p.run(); p.waitUntilExit()
+        let raw = out.fileHandleForReading.readDataToEndOfFile()
+        guard let obj = try? JSONSerialization.jsonObject(with: raw) as? [String: Any],
+              let oauth = obj["claudeAiOauth"] as? [String: Any],
+              let token = oauth["accessToken"] as? String else { completion(nil); return }
+        let plan = oauth["subscriptionType"] as? String
+
+        var req = URLRequest(url: URL(string: "https://api.anthropic.com/api/oauth/usage")!)
+        req.setValue("Bearer \(token)", forHTTPHeaderField: "Authorization")
+        req.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
+        req.setValue("claude-session-monitor", forHTTPHeaderField: "User-Agent")
+        req.timeoutInterval = 12
+        URLSession.shared.dataTask(with: req) { data, _, _ in
+            guard let data = data,
+                  let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { completion(nil); return }
+            func win(_ key: String) -> (Double, Date?) {
+                guard let o = j[key] as? [String: Any] else { return (0, nil) }
+                let pct = o["utilization"] as? Double ?? 0
+                let reset = (o["resets_at"] as? String).flatMap { parseTS($0) }
+                return (pct, reset)
+            }
+            let (f, fr) = win("five_hour"); let (w, wr) = win("seven_day")
+            completion(UsageInfo(fiveHourPct: f, fiveHourReset: fr, weekPct: w, weekReset: wr, plan: plan))
+        }.resume()
     }
 }
 
@@ -889,12 +947,13 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     private let taskCheck = NSButton(checkboxWithTitle: L("pref_task"), target: nil, action: nil)
     private let pushCheck = NSButton(checkboxWithTitle: L("pref_push"), target: nil, action: nil)
     private let loginCheck = NSButton(checkboxWithTitle: L("pref_login"), target: nil, action: nil)
+    private let usageCheck = NSButton(checkboxWithTitle: L("pref_usage"), target: nil, action: nil)
     private var valueLabels: [NSSlider: NSTextField] = [:]
     private var suffixes: [NSSlider: String] = [:]
 
     init(store: ConfigStore, onChange: @escaping () -> Void, onClose: @escaping () -> Void) {
         self.store = store; self.onChange = onChange; self.onClose = onClose
-        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 520),
+        let win = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 600),
                            styleMask: [.titled, .closable], backing: .buffered, defer: false)
         win.title = "Claude Session Monitor"
         super.init(window: win)
@@ -918,7 +977,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
             sliderRow(L("pref_yellow"), yellowSlider, 0, 100, "%"),
             labeledRow(L("pref_window"), windowPopup),
             labeledRow(L("pref_language"), langPopup),
-            loginCheck, alertCheck, branchCheck, taskCheck, pushCheck,
+            loginCheck, usageCheck, alertCheck, branchCheck, taskCheck, pushCheck,
         ])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -930,7 +989,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         langPopup.removeAllItems()
         langPopup.addItems(withTitles: [L("lang_system"), "English", "Español", "Português"])
         langPopup.target = self; langPopup.action = #selector(changed)
-        for ck in [alertCheck, branchCheck, taskCheck, pushCheck] { ck.target = self; ck.action = #selector(changed) }
+        for ck in [usageCheck, alertCheck, branchCheck, taskCheck, pushCheck] { ck.target = self; ck.action = #selector(changed) }
         loginCheck.target = self; loginCheck.action = #selector(toggleLogin)   // gestionado por el sistema, no por Config
 
         let reset = NSButton(title: L("pref_reset"), target: self, action: #selector(resetDefaults))
@@ -1067,6 +1126,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         branchCheck.state = c.showBranch ? .on : .off
         taskCheck.state = c.showCurrentTask ? .on : .off
         pushCheck.state = c.pushToClaude ? .on : .off
+        usageCheck.state = c.showUsage ? .on : .off
         loginCheck.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
         updateLabels()
     }
@@ -1102,6 +1162,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         c.showBranch = branchCheck.state == .on
         c.showCurrentTask = taskCheck.state == .on
         c.pushToClaude = pushCheck.state == .on
+        c.showUsage = usageCheck.state == .on
         c.language = ["system", "en", "es", "pt"][langPopup.indexOfSelectedItem]
         store.apply(c)
         updateLabels()
@@ -1113,6 +1174,42 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         store.apply(Config())
         loadValues()
         onChange()
+    }
+}
+
+/// Barra de uso de la cuenta: etiqueta + barra real coloreada + % + tiempo hasta el reset.
+final class UsageBarView: NSView {
+    private let title: String
+    private let pct: Double
+    private let reset: Date?
+    init(title: String, pct: Double, reset: Date?) {
+        self.title = title; self.pct = pct; self.reset = reset
+        super.init(frame: NSRect(x: 0, y: 0, width: 372, height: 22))
+    }
+    required init?(coder: NSCoder) { fatalError() }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let hl = enclosingMenuItem?.isHighlighted ?? false
+        drawHighlight(bounds, hl)
+        let txt = hl ? NSColor.selectedMenuItemTextColor : NSColor.labelColor
+        let sec = hl ? NSColor.selectedMenuItemTextColor : NSColor.secondaryLabelColor
+        let midY = bounds.midY
+        let color = usageColor(pct)
+
+        drawText(title, NSRect(x: 16, y: midY - 9, width: 64, height: 18), color: txt, font: .systemFont(ofSize: 12, weight: .medium))
+        let bar = NSRect(x: 84, y: midY - 4, width: 150, height: 7)
+        (hl ? NSColor.white.withAlphaComponent(0.25) : NSColor.quaternaryLabelColor).setFill()
+        NSBezierPath(roundedRect: bar, xRadius: 3.5, yRadius: 3.5).fill()
+        let w = max(4, bar.width * CGFloat(min(1, pct / 100)))
+        color.setFill()
+        NSBezierPath(roundedRect: NSRect(x: bar.minX, y: bar.minY, width: w, height: bar.height), xRadius: 3.5, yRadius: 3.5).fill()
+
+        drawText(String(format: "%.0f%%", pct), NSRect(x: 240, y: midY - 9, width: 40, height: 18),
+                 color: txt, font: .monospacedDigitSystemFont(ofSize: 12, weight: .regular), align: .right)
+        if let reset = reset, reset.timeIntervalSinceNow > 0 {
+            drawText("↻ \(formatDuration(reset.timeIntervalSinceNow))", NSRect(x: 286, y: midY - 9, width: 80, height: 18),
+                     color: sec, font: .systemFont(ofSize: 11), align: .right)
+        }
     }
 }
 
@@ -1128,6 +1225,8 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var agentViews: [AgentRowView] = []
     private var lastSessions: [Session] = []   // último snapshot (para abrir el menú al instante)
     private var scanning = false               // evita escaneos solapados
+    private var usage: UsageInfo?              // uso de la cuenta (cacheado)
+    private var lastUsageFetch: Date = .distantPast
     private var prefs: PreferencesWindowController?
     private let store = ConfigStore()
     private let history = History()
@@ -1152,6 +1251,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func refresh() {
         store.reloadIfChanged()
         rescheduleTimer()
+        maybeFetchUsage()
         guard !scanning else { return }   // ya hay uno en curso
         scanning = true
         let c = store.config
@@ -1168,6 +1268,26 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
                     self.rebuildMenu(sessions: sessions, active: active, c: c)
                 }
                 if c.alertOnRed { self.checkAlerts(active, c: c) }
+            }
+        }
+    }
+
+    /// Consulta el uso de la cuenta (máx. cada 60s, en segundo plano).
+    private func maybeFetchUsage() {
+        guard store.config.showUsage else { if usage != nil { usage = nil } ; return }
+        guard Date().timeIntervalSince(lastUsageFetch) > 60 else { return }
+        lastUsageFetch = Date()
+        DispatchQueue.global(qos: .utility).async {
+            Usage.fetch { info in
+                DispatchQueue.main.async {
+                    guard let info = info else { return }
+                    self.usage = info
+                    if !self.menuOpen {
+                        let c = self.store.config
+                        let active = self.lastSessions.filter { !$0.hidden && $0.isActive(c) }
+                        self.rebuildMenu(sessions: self.lastSessions, active: active, c: c)
+                    }
+                }
             }
         }
     }
@@ -1198,6 +1318,21 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
         let visible = sessions.filter { !$0.hidden }
         let hiddenOnes = sessions.filter { $0.hidden }
+
+        // sección de uso de la cuenta (5h / semanal)
+        if store.config.showUsage, let u = usage {
+            let uh = NSMenuItem(title: L("usage_header"), action: nil, keyEquivalent: "")
+            uh.isEnabled = false
+            let plan = (u.plan ?? "").uppercased()
+            uh.attributedTitle = NSAttributedString(string: plan.isEmpty ? L("usage_header") : "\(L("usage_header"))  ·  \(plan)", attributes: [
+                .font: NSFont.systemFont(ofSize: 11, weight: .semibold), .foregroundColor: NSColor.secondaryLabelColor])
+            menu.addItem(uh)
+            let b5 = NSMenuItem(); b5.view = UsageBarView(title: L("usage_5h"), pct: u.fiveHourPct, reset: u.fiveHourReset); b5.isEnabled = true
+            menu.addItem(b5)
+            let bw = NSMenuItem(); bw.view = UsageBarView(title: L("usage_week"), pct: u.weekPct, reset: u.weekReset); bw.isEnabled = true
+            menu.addItem(bw)
+            menu.addItem(.separator())
+        }
 
         let header = NSMenuItem(title: Lf("header", active.count, visible.count), action: nil, keyEquivalent: "")
         header.isEnabled = false

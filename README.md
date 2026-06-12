@@ -21,6 +21,7 @@
 - **Contexto por sesión** con barra de color: 🟢 verde (<40%), 🟡 amarillo (40–70%), 🔴 rojo (>70%).
 - **Agentes en vivo** por sesión: nombre, **tiempo de ejecución** (reloj que avanza) y **tokens**.
 - **Estado real** leyendo el proceso: **Activa**, **Dormida** (ventana abierta, inactiva) o **Cerrada**, agrupadas con encabezado.
+- **Uso de la cuenta**: barras de **5h** y **semanal** (utilización %) con cuenta regresiva hasta el reset, leídas de la API de Anthropic (`/api/oauth/usage`, mismo token que Claude Code).
 - **Tendencia** del contexto con mini-gráfico, y **alerta** con sonido al entrar en rojo.
 - **Nombre y color** que le pusiste a la sesión en Claude Code (`/rename`, `/color`).
 - **Estado del control remoto** (conectado / desconectado) por sesión.
@@ -126,6 +127,7 @@ Se edita desde **Preferencias** (o el archivo `~/.config/claude-session-monitor/
 | Umbral verde / amarillo | 40 / 70 % | límites de color |
 | Ventana de contexto | Automático | 200k / 1M, o auto |
 | Idioma | Sistema | Sistema · English · Español · Português |
+| Mostrar uso de la cuenta | sí | lee el token del Keychain y consulta `/api/oauth/usage` |
 | Iniciar al arrancar | no | registra la app como ítem de inicio |
 | Notificar en rojo | sí | alerta al superar el umbral |
 
@@ -140,8 +142,13 @@ Se edita desde **Preferencias** (o el archivo `~/.config/claude-session-monitor/
 
 ## 🔒 Privacidad
 
-No usa la red. Solo **lee** archivos locales de `~/.claude` y, opcionalmente, **escribe**
-preferencias del propio monitor en `~/.config/claude-session-monitor/`.
+Por defecto solo **lee** archivos locales de `~/.claude` y **escribe** las preferencias del
+propio monitor en `~/.config/claude-session-monitor/`.
+
+Si activas **«Mostrar uso de la cuenta»** (Settings), además lee el token OAuth del **Keychain**
+(el mismo que usa Claude Code) y hace **una** llamada de red a
+`https://api.anthropic.com/api/oauth/usage` — únicamente para consultar **tu propia** utilización.
+Es la única conexión que hace la app, y puedes desactivarla.
 
 ## ⚠️ Limitaciones
 
