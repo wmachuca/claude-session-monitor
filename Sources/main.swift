@@ -46,6 +46,7 @@ let STRINGS: [String: [Lang: String]] = [
     "model": [.en: "Model: %@", .es: "Modelo: %@", .pt: "Modelo: %@"],
     "branch": [.en: "Branch: %@", .es: "Rama: %@", .pt: "Ramo: %@"],
     "goto_window": [.en: "↗ Go to this session's window", .es: "↗ Ir a la ventana de esta sesión", .pt: "↗ Ir para a janela desta sessão"],
+    "resume_session": [.en: "▶ Resume this session", .es: "▶ Retomar esta sesión", .pt: "▶ Retomar esta sessão"],
     "no_agents": [.en: "No active agents", .es: "Sin agentes activos", .pt: "Sem agentes ativos"],
     "active_agents": [.en: "Active agents (%d)", .es: "Agentes activos (%d)", .pt: "Agentes ativos (%d)"],
     "in_monitor": [.en: "In the monitor", .es: "En el monitor", .pt: "No monitor"],
@@ -284,6 +285,7 @@ func formatDuration(_ seconds: Double) -> String {
 struct Session {
     let id: String
     let project: String
+    let cwd: String             // carpeta de la sesión (para retomarla)
     let branch: String
     let model: String
     let contextTokens: Int
@@ -444,6 +446,7 @@ enum Usage {
 struct TranscriptParse {
     let ctx: Int
     let cwd: String
+    let firstCwd: String   // primer cwd del transcript = directorio de lanzamiento (para retomar)
     let branch: String
     let model: String
     let custom: String?
@@ -468,10 +471,17 @@ enum Parser {
             if let r = usageTokens(in: line) { (ctx, cwd, branch, model) = r; found = true; break }
         }
         guard found else { return nil }
+        // primer cwd (directorio de lanzamiento), antes de que derive durante la sesión
+        var firstCwd = ""
+        for line in lines where line.contains("\"cwd\"") {
+            if let d = line.data(using: .utf8),
+               let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
+               let cw = o["cwd"] as? String, !cw.isEmpty { firstCwd = cw; break }
+        }
         let custom = reverseFind(lines, "\"type\":\"custom-title\"")?["customTitle"] as? String
         let ai = reverseFind(lines, "\"type\":\"ai-title\"")?["aiTitle"] as? String
         let colorName = reverseFind(lines, "\"type\":\"agent-color\"")?["agentColor"] as? String
-        return TranscriptParse(ctx: ctx, cwd: cwd, branch: branch, model: model,
+        return TranscriptParse(ctx: ctx, cwd: cwd, firstCwd: firstCwd, branch: branch, model: model,
                                custom: custom, ai: ai, colorName: colorName, agentNames: agentNames(lines))
     }
 
@@ -528,11 +538,11 @@ enum Parser {
         return r == 0 || errno == EPERM
     }
 
-    static func liveMeta(home: URL) -> [String: (name: String?, busy: Bool?, pid: Int?, bridged: Bool, alive: Bool)] {
+    static func liveMeta(home: URL) -> [String: (name: String?, busy: Bool?, pid: Int?, bridged: Bool, alive: Bool, cwd: String?)] {
         let dir = home.appendingPathComponent(".claude/sessions")
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(at: dir, includingPropertiesForKeys: nil) else { return [:] }
-        var best: [String: (name: String?, busy: Bool?, pid: Int?, bridged: Bool, updated: Double)] = [:]
+        var best: [String: (name: String?, busy: Bool?, pid: Int?, bridged: Bool, cwd: String?, updated: Double)] = [:]
         for f in files where f.pathExtension == "json" {
             guard let data = try? Data(contentsOf: f),
                   let o = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
@@ -541,10 +551,10 @@ enum Parser {
             if let prev = best[sid], prev.updated >= updated { continue }   // conserva el más reciente
             let busy = (o["status"] as? String).map { $0 == "busy" }
             let bridged = (o["bridgeSessionId"] as? String) != nil          // control remoto conectado
-            best[sid] = (o["name"] as? String, busy, o["pid"] as? Int, bridged, updated)
+            best[sid] = (o["name"] as? String, busy, o["pid"] as? Int, bridged, o["cwd"] as? String, updated)
         }
         return best.mapValues { v in
-            (v.name, v.busy, v.pid, v.bridged, v.pid.map { processAlive($0) } ?? false)
+            (v.name, v.busy, v.pid, v.bridged, v.pid.map { processAlive($0) } ?? false, v.cwd)
         }
     }
 
@@ -637,12 +647,14 @@ enum Parser {
                 let colorName = ov?.color ?? p.colorName   // override del monitor tiene prioridad
 
                 let window = c.forceContextWindow ?? (p.ctx <= 200_000 ? 200_000 : 1_000_000)
-                let project = p.cwd.isEmpty ? id : (p.cwd as NSString).lastPathComponent
+                // cwd fiable = directorio de lanzamiento: sessions/*.json > primer cwd del transcript > último
+                let launchCwd = (lm?.cwd?.isEmpty == false ? lm?.cwd : nil) ?? (p.firstCwd.isEmpty ? p.cwd : p.firstCwd)
+                let project = launchCwd.isEmpty ? id : (launchCwd as NSString).lastPathComponent
 
                 let (live, total) = subagents(projectDir: dir, sessionId: id, now: now, c: c, names: p.agentNames)
                 let task = c.showCurrentTask ? currentTask(home: home, sessionId: id) : nil
 
-                out.append(Session(id: id, project: project, branch: p.branch,
+                out.append(Session(id: id, project: project, cwd: launchCwd, branch: p.branch,
                                    model: shortModel(p.model), contextTokens: p.ctx, window: window,
                                    mtime: mtime, liveSubagents: live, totalSubagents: total,
                                    currentTask: task, title: title, colorName: colorName, busy: lm?.busy, pid: lm?.pid,
@@ -1462,12 +1474,14 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         info(Lf("model", s.model), useMono: true)
         if let b = s.meaningfulBranch { info(Lf("branch", b), useMono: true) }
 
-        if let pid = s.pid {
+        if s.alive, let pid = s.pid {
             let go = NSMenuItem(title: L("goto_window"), action: #selector(goToWindow(_:)), keyEquivalent: "")
-            go.target = self
-            go.representedObject = pid
-            go.isEnabled = true
+            go.target = self; go.representedObject = pid; go.isEnabled = true
             sub.addItem(go)
+        } else {
+            let rs = NSMenuItem(title: L("resume_session"), action: #selector(resumeSession(_:)), keyEquivalent: "")
+            rs.target = self; rs.representedObject = s.id; rs.isEnabled = true
+            sub.addItem(rs)
         }
 
         let it = NSMenuItem()
@@ -1560,6 +1574,47 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     @objc private func goToWindow(_ sender: NSMenuItem) {
         guard let pid = sender.representedObject as? Int else { return }
         focusTerminalWindow(claudePid: pid)
+    }
+
+    /// Retoma una sesión cerrada: abre la terminal en su carpeta y ejecuta `claude --resume <id>`.
+    @objc private func resumeSession(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String,
+              let s = lastSessions.first(where: { $0.id == id }) else { return }
+        let cwdQuoted = "'" + s.cwd.replacingOccurrences(of: "'", with: "'\\''") + "'"
+        let cmd = "cd \(cwdQuoted); claude --resume \(id)"
+        let esc = cmd.replacingOccurrences(of: "\\", with: "\\\\").replacingOccurrences(of: "\"", with: "\\\"")
+        if preferredTerminalKind() == "iTerm2" {
+            runScript("""
+            tell application "iTerm2"
+                activate
+                create window with default profile
+                tell current session of current window to write text "\(esc)"
+            end tell
+            """)
+        } else {
+            runScript("""
+            tell application "Terminal"
+                activate
+                do script "\(esc)"
+            end tell
+            """)
+        }
+    }
+
+    /// Detecta la terminal a usar a partir de una sesión viva; si no hay, Terminal.app.
+    private func preferredTerminalKind() -> String {
+        guard let pid = lastSessions.first(where: { $0.alive })?.pid else { return "Terminal" }
+        var cur = pid
+        for _ in 0..<10 {
+            let line = shell("/bin/ps", ["-o", "ppid=,comm=", "-p", "\(cur)"]).trimmingCharacters(in: .whitespaces)
+            guard let sp = line.firstIndex(of: " "), let ppid = Int(line[..<sp]) else { break }
+            let comm = line[line.index(after: sp)...]
+            if comm.contains("iTerm") { return "iTerm2" }
+            if comm.contains("Terminal") { return "Terminal" }
+            cur = ppid
+            if cur <= 1 { break }
+        }
+        return "Terminal"
     }
 
     /// Enfoca la ventana/pestaña de terminal que hospeda al proceso claude `pid`.
