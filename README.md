@@ -47,7 +47,9 @@ open ClaudeSessionMonitor.app
 `build.sh` compila, empaqueta el `.app` y lo firma con una identidad estable propia
 (se crea sola la primera vez) para que los permisos de macOS persistan entre recompilaciones.
 
-**Iniciar al arrancar:** Ajustes del sistema → General → Ítems de inicio → `+` → elige `ClaudeSessionMonitor.app`.
+**Iniciar al arrancar:** actívalo desde **Preferencias → Settings → «Iniciar al arrancar el equipo»**
+(usa `SMAppService`, la API moderna de macOS). También puedes hacerlo a mano en
+Ajustes del sistema → General → Ítems de inicio.
 
 ## 🚀 Cómo usarlo
 
@@ -124,6 +126,7 @@ Se edita desde **Preferencias** (o el archivo `~/.config/claude-session-monitor/
 | Umbral verde / amarillo | 40 / 70 % | límites de color |
 | Ventana de contexto | Automático | 200k / 1M, o auto |
 | Idioma | Sistema | Sistema · English · Español · Português |
+| Iniciar al arrancar | no | registra la app como ítem de inicio |
 | Notificar en rojo | sí | alerta al superar el umbral |
 
 ## 🔍 De dónde salen los datos (todo local)

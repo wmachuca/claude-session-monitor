@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import ApplicationServices
+import ServiceManagement
 
 // MARK: - Internacionalización (en / es / pt, alineada con el OS)
 
@@ -96,6 +97,7 @@ let STRINGS: [String: [Lang: String]] = [
     "pref_task": [.en: "Show current task (in-progress TODO)", .es: "Mostrar la tarea actual (TODO en progreso)", .pt: "Mostrar a tarefa atual (TODO em andamento)"],
     "pref_push": [.en: "Send changes to Claude Code (types /color · /rename · experimental)", .es: "Enviar cambios a Claude Code (teclea /color · /rename · experimental)", .pt: "Enviar alterações ao Claude Code (digita /color · /rename · experimental)"],
     "pref_reset": [.en: "Reset to defaults", .es: "Restablecer valores por defecto", .pt: "Restaurar padrões"],
+    "pref_login": [.en: "Launch at login", .es: "Iniciar al arrancar el equipo", .pt: "Iniciar ao ligar o computador"],
     "about_version": [.en: "Version 1.0", .es: "Versión 1.0", .pt: "Versão 1.0"],
     "about_desc": [.en: "Menu-bar monitor for your Claude Code sessions: context used, live agents with time and tokens, trend and state. Reads local data from ~/.claude; no network.", .es: "Monitor de barra de menús para las sesiones de Claude Code: contexto usado, agentes en vivo con su tiempo y tokens, tendencia y estado. Lee datos locales de ~/.claude; no usa la red.", .pt: "Monitor de barra de menus para as sessões do Claude Code: contexto usado, agentes ao vivo com tempo e tokens, tendência e estado. Lê dados locais de ~/.claude; sem rede."],
     "about_author": [.en: "by Wilmer Machuca", .es: "por Wilmer Machuca", .pt: "por Wilmer Machuca"],
@@ -886,6 +888,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
     private let branchCheck = NSButton(checkboxWithTitle: L("pref_branch"), target: nil, action: nil)
     private let taskCheck = NSButton(checkboxWithTitle: L("pref_task"), target: nil, action: nil)
     private let pushCheck = NSButton(checkboxWithTitle: L("pref_push"), target: nil, action: nil)
+    private let loginCheck = NSButton(checkboxWithTitle: L("pref_login"), target: nil, action: nil)
     private var valueLabels: [NSSlider: NSTextField] = [:]
     private var suffixes: [NSSlider: String] = [:]
 
@@ -915,7 +918,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
             sliderRow(L("pref_yellow"), yellowSlider, 0, 100, "%"),
             labeledRow(L("pref_window"), windowPopup),
             labeledRow(L("pref_language"), langPopup),
-            alertCheck, branchCheck, taskCheck, pushCheck,
+            loginCheck, alertCheck, branchCheck, taskCheck, pushCheck,
         ])
         stack.orientation = .vertical
         stack.alignment = .leading
@@ -928,6 +931,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         langPopup.addItems(withTitles: [L("lang_system"), "English", "Español", "Português"])
         langPopup.target = self; langPopup.action = #selector(changed)
         for ck in [alertCheck, branchCheck, taskCheck, pushCheck] { ck.target = self; ck.action = #selector(changed) }
+        loginCheck.target = self; loginCheck.action = #selector(toggleLogin)   // gestionado por el sistema, no por Config
 
         let reset = NSButton(title: L("pref_reset"), target: self, action: #selector(resetDefaults))
         reset.bezelStyle = .rounded
@@ -1063,7 +1067,18 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
         branchCheck.state = c.showBranch ? .on : .off
         taskCheck.state = c.showCurrentTask ? .on : .off
         pushCheck.state = c.pushToClaude ? .on : .off
+        loginCheck.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
         updateLabels()
+    }
+
+    @objc private func toggleLogin() {
+        do {
+            if loginCheck.state == .on { try SMAppService.mainApp.register() }
+            else { try SMAppService.mainApp.unregister() }
+        } catch {
+            // si falla, refleja el estado real
+            loginCheck.state = (SMAppService.mainApp.status == .enabled) ? .on : .off
+        }
     }
 
     private func updateLabels() {

@@ -46,7 +46,7 @@ rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 
 swiftc -O Sources/main.swift -o "$BIN" \
-    -framework AppKit -framework Foundation
+    -framework AppKit -framework Foundation -framework ServiceManagement
 
 # ícono de la app
 [ -f Resources/AppIcon.icns ] && cp Resources/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
