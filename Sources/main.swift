@@ -421,8 +421,11 @@ enum Usage {
         req.setValue("claude-session-monitor", forHTTPHeaderField: "User-Agent")
         req.timeoutInterval = 12
         URLSession.shared.dataTask(with: req) { data, _, _ in
+            // si hay error (p.ej. rate limit) o no llegan ventanas válidas, NO actualices (conserva lo último bueno)
             guard let data = data,
-                  let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { completion(nil); return }
+                  let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  j["error"] == nil,
+                  (j["five_hour"] is [String: Any] || j["seven_day"] is [String: Any]) else { completion(nil); return }
             func win(_ key: String) -> (Double, Date?) {
                 guard let o = j[key] as? [String: Any] else { return (0, nil) }
                 let pct = o["utilization"] as? Double ?? 0
@@ -741,7 +744,17 @@ private func drawHighlight(_ bounds: NSRect, _ highlighted: Bool) {
 }
 
 /// Fila de una sesión: forma de estado + nombre + barra de progreso real + % + tendencia + agentes.
-final class SessionRowView: NSView {
+/// Base de filas de menú: se ajustan al ancho REAL del menú (no a un ancho fijo).
+class MenuRow: NSView {
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        autoresizingMask = [.width]
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    override func setFrameSize(_ newSize: NSSize) { super.setFrameSize(newSize); needsDisplay = true }
+}
+
+final class SessionRowView: MenuRow {
     private let s: Session
     private let cfg: Config
     private let trend: String
@@ -784,38 +797,39 @@ final class SessionRowView: NSView {
         } else {
             drawSymbol(s.symbol(cfg), color: lvl.withAlphaComponent(a), rect: NSRect(x: 12, y: midY - 7, width: 14, height: 14))
         }
-        drawText(s.displayName, NSRect(x: 32, y: midY - 9, width: 132, height: 18),
-                 color: txt, font: .systemFont(ofSize: 13, weight: .medium), truncate: true)
+        let R = bounds.width   // cluster derecho anclado al borde real del menú
+        drawText("›", NSRect(x: R - 16, y: midY - 10, width: 10, height: 18), color: sec, font: .systemFont(ofSize: 14))
+        if liveCount > 0 {
+            drawText("🤖\(liveCount)", NSRect(x: R - 52, y: midY - 9, width: 34, height: 18), color: txt, font: .systemFont(ofSize: 12))
+        } else if s.busy == true {
+            NSColor.systemGreen.withAlphaComponent(a).setFill()
+            NSBezierPath(ovalIn: NSRect(x: R - 46, y: midY - 4, width: 8, height: 8)).fill()
+        } else if !active {
+            let icon = s.alive ? "moon.zzz.fill" : "pause.circle.fill"
+            drawSymbol(icon, color: sec, rect: NSRect(x: R - 50, y: midY - 7, width: 14, height: 14), weight: .regular)
+        }
+        drawText(trend, NSRect(x: R - 72, y: midY - 9, width: 14, height: 18), color: sec, font: .systemFont(ofSize: 12))
+        drawText(String(format: "%.0f%%", s.pct), NSRect(x: R - 116, y: midY - 9, width: 38, height: 18),
+                 color: txt, font: .monospacedDigitSystemFont(ofSize: 12, weight: .regular), align: .right)
 
-        // barra de progreso real (pista + relleno redondeados)
-        let bar = NSRect(x: 172, y: midY - 4, width: 84, height: 7)
+        // barra de progreso real, anclada a la izquierda del %
+        let barW: CGFloat = 84
+        let bar = NSRect(x: R - 126 - barW, y: midY - 4, width: barW, height: 7)
         (hl ? NSColor.white.withAlphaComponent(0.25) : NSColor.quaternaryLabelColor).setFill()
         NSBezierPath(roundedRect: bar, xRadius: 3.5, yRadius: 3.5).fill()
         let w = max(4, bar.width * CGFloat(min(1, s.pct / 100)))
         lvl.withAlphaComponent(a).setFill()
         NSBezierPath(roundedRect: NSRect(x: bar.minX, y: bar.minY, width: w, height: bar.height), xRadius: 3.5, yRadius: 3.5).fill()
 
-        drawText(String(format: "%.0f%%", s.pct), NSRect(x: 260, y: midY - 9, width: 36, height: 18),
-                 color: txt, font: .monospacedDigitSystemFont(ofSize: 12, weight: .regular), align: .right)
-        drawText(trend, NSRect(x: 300, y: midY - 9, width: 14, height: 18), color: sec, font: .systemFont(ofSize: 12))
-
-        if liveCount > 0 {
-            drawText("🤖\(liveCount)", NSRect(x: 312, y: midY - 9, width: 40, height: 18), color: txt, font: .systemFont(ofSize: 12))
-        } else if s.busy == true {
-            // luz de estado: procesando ahora
-            NSColor.systemGreen.withAlphaComponent(a).setFill()
-            NSBezierPath(ovalIn: NSRect(x: 322, y: midY - 4, width: 8, height: 8)).fill()
-        } else if !active {
-            // dormida (ventana abierta) = luna 💤 ; cerrada = pausa
-            let icon = s.alive ? "moon.zzz.fill" : "pause.circle.fill"
-            drawSymbol(icon, color: sec, rect: NSRect(x: 320, y: midY - 7, width: 14, height: 14), weight: .regular)
-        }
-        drawText("›", NSRect(x: 356, y: midY - 10, width: 10, height: 18), color: sec, font: .systemFont(ofSize: 14))
+        // nombre: ocupa el espacio entre el marcador y la barra
+        let nameW = max(40, bar.minX - 32 - 10)
+        drawText(s.displayName, NSRect(x: 32, y: midY - 9, width: nameW, height: 18),
+                 color: txt, font: .systemFont(ofSize: 13, weight: .medium), truncate: true)
     }
 }
 
 /// Fila de un agente activo: en vivo + nombre + tarea + tiempo de ejecución (reloj) + tokens.
-final class AgentRowView: NSView {
+final class AgentRowView: MenuRow {
     private let name: String
     private let desc: String?
     private let start: Date?
@@ -849,17 +863,17 @@ final class AgentRowView: NSView {
             line.append(NSAttributedString(string: "  \(d)", attributes: [
                 .foregroundColor: sec, .font: NSFont.systemFont(ofSize: 11), .paragraphStyle: p]))
         }
-        line.draw(in: NSRect(x: 30, y: midY - 8, width: 210, height: 16))
-
-        let elapsed = start.map { Date().timeIntervalSince($0) } ?? fallbackElapsed
-        drawText(formatDuration(elapsed), NSRect(x: 246, y: midY - 8, width: 62, height: 16), color: txt, font: mono, align: .right)
+        let R = bounds.width
         let tok = tokens >= 1000 ? String(format: "%.0fk", Double(tokens) / 1000) : "\(tokens)"
-        drawText("↓ \(tok) tok", NSRect(x: 312, y: midY - 8, width: 70, height: 16), color: sec, font: mono, align: .right)
+        drawText("↓ \(tok) tok", NSRect(x: R - 90, y: midY - 8, width: 78, height: 16), color: sec, font: mono, align: .right)
+        let elapsed = start.map { Date().timeIntervalSince($0) } ?? fallbackElapsed
+        drawText(formatDuration(elapsed), NSRect(x: R - 158, y: midY - 8, width: 62, height: 16), color: txt, font: mono, align: .right)
+        line.draw(in: NSRect(x: 30, y: midY - 8, width: max(60, R - 168), height: 16))
     }
 }
 
 /// Mini-gráfico de tendencia del contexto (línea + área), como componente real.
-final class TrendChartView: NSView {
+final class TrendChartView: MenuRow {
     private let vals: [Double]
     private let color: NSColor
     private let arrow: String
@@ -1180,7 +1194,7 @@ final class PreferencesWindowController: NSWindowController, NSWindowDelegate {
 }
 
 /// Cabecera de la sección de uso: "USO DE LA CUENTA" a la izquierda, "Plan: XXX" a la derecha.
-final class UsageHeaderView: NSView {
+final class UsageHeaderView: MenuRow {
     private let plan: String
     init(plan: String) {
         self.plan = plan
@@ -1193,14 +1207,14 @@ final class UsageHeaderView: NSView {
         let midY = bounds.midY
         drawText(L("usage_header"), NSRect(x: 16, y: midY - 9, width: 220, height: 18), color: sec, font: f)
         if !plan.isEmpty {
-            drawText("\(L("usage_plan")): \(plan)", NSRect(x: bounds.width - 170, y: midY - 9, width: 150, height: 18),
+            drawText("\(L("usage_plan")): \(plan)", NSRect(x: bounds.width - 166, y: midY - 9, width: 150, height: 18),
                      color: sec, font: f, align: .right)
         }
     }
 }
 
 /// Barra de uso de la cuenta: etiqueta + barra real coloreada + % + tiempo hasta el reset.
-final class UsageBarView: NSView {
+final class UsageBarView: MenuRow {
     private let title: String
     private let pct: Double
     private let reset: Date?
@@ -1219,21 +1233,23 @@ final class UsageBarView: NSView {
         let sec = hl ? NSColor.selectedMenuItemTextColor : NSColor.secondaryLabelColor
         let midY = bounds.midY
         let color = usageColor(pct)
+        let R = bounds.width
 
         drawText(title, NSRect(x: 16, y: midY - 9, width: 64, height: 18), color: txt, font: .systemFont(ofSize: 12, weight: .medium))
-        let bar = NSRect(x: 84, y: midY - 4, width: 142, height: 7)
+        if let reset = reset, reset.timeIntervalSinceNow > 0 {
+            drawText("↻ \(formatDuration(reset.timeIntervalSinceNow))", NSRect(x: R - 86, y: midY - 9, width: 72, height: 18),
+                     color: sec, font: .systemFont(ofSize: 11), align: .right)
+        }
+        drawText(String(format: "%.0f%%", pct), NSRect(x: R - 134, y: midY - 9, width: 42, height: 18),
+                 color: txt, font: .monospacedDigitSystemFont(ofSize: 12, weight: .regular), align: .right)
+
+        // barra: rellena el espacio entre el título y el %
+        let bar = NSRect(x: 84, y: midY - 4, width: max(40, (R - 144) - 84), height: 7)
         (hl ? NSColor.white.withAlphaComponent(0.25) : NSColor.quaternaryLabelColor).setFill()
         NSBezierPath(roundedRect: bar, xRadius: 3.5, yRadius: 3.5).fill()
         let w = max(4, bar.width * CGFloat(min(1, pct / 100)))
         color.setFill()
         NSBezierPath(roundedRect: NSRect(x: bar.minX, y: bar.minY, width: w, height: bar.height), xRadius: 3.5, yRadius: 3.5).fill()
-
-        drawText(String(format: "%.0f%%", pct), NSRect(x: 232, y: midY - 9, width: 42, height: 18),
-                 color: txt, font: .monospacedDigitSystemFont(ofSize: 12, weight: .regular), align: .right)
-        if let reset = reset, reset.timeIntervalSinceNow > 0 {
-            drawText("↻ \(formatDuration(reset.timeIntervalSinceNow))", NSRect(x: 280, y: midY - 9, width: 72, height: 18),
-                     color: sec, font: .systemFont(ofSize: 11), align: .right)
-        }
     }
 }
 
@@ -1300,7 +1316,7 @@ class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     /// Consulta el uso de la cuenta (máx. cada 60s, en segundo plano).
     private func maybeFetchUsage() {
         guard store.config.showUsage else { if usage != nil { usage = nil } ; return }
-        guard Date().timeIntervalSince(lastUsageFetch) > 60 else { return }
+        guard Date().timeIntervalSince(lastUsageFetch) > 300 else { return }   // cada 5 min (el endpoint también limita)
         lastUsageFetch = Date()
         DispatchQueue.global(qos: .utility).async {
             Usage.fetch { info in
