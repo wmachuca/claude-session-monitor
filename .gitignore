@@ -1,0 +1,8 @@
+# build artifact
+ClaudeSessionMonitor.app/
+
+# macOS
+.DS_Store
+
+# temp
+*.iconset/
