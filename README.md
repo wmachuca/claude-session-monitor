@@ -41,9 +41,10 @@
 ```bash
 git clone https://github.com/wmachuca/claude-session-monitor.git
 cd claude-session-monitor
-./build.sh
-open ClaudeSessionMonitor.app
+./install.sh        # compila e instala en /Applications, y la lanza
 ```
+
+> ¿Solo quieres probarla sin instalar? `./build.sh && open ClaudeSessionMonitor.app`
 
 `build.sh` compila, empaqueta el `.app` y lo firma con una identidad estable propia
 (se crea sola la primera vez) para que los permisos de macOS persistan entre recompilaciones.
