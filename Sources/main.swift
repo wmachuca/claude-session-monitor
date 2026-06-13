@@ -576,19 +576,28 @@ enum Parser {
             }
         }
         var map: [String: (name: String, desc: String?)] = [:]
-        for line in lines where line.contains("(internal ID") {
+        for line in lines where line.contains("\"agentId\"") || line.contains("(internal ID") {
             guard let d = line.data(using: .utf8),
                   let o = try? JSONSerialization.jsonObject(with: d) as? [String: Any],
                   let msg = o["message"] as? [String: Any],
                   let content = msg["content"] as? [[String: Any]] else { continue }
+            let useId = content.first { ($0["type"] as? String) == "tool_result" }?["tool_use_id"] as? String
+
+            // Subagentes síncronos (Task): el resultado trae agentId + agentType directamente.
+            if let tur = o["toolUseResult"] as? [String: Any], let aid = tur["agentId"] as? String, !aid.isEmpty {
+                let name = (tur["agentType"] as? String) ?? useId.flatMap { calls[$0]?.0 } ?? "agent"
+                map[aid] = (name, useId.flatMap { calls[$0]?.1 })
+                continue
+            }
+            // Agentes en segundo plano (Agent): el agentId viene en el texto "(internal ID".
             for b in content where (b["type"] as? String) == "tool_result" {
-                guard let useId = b["tool_use_id"] as? String else { continue }
+                guard let uid = b["tool_use_id"] as? String else { continue }
                 var text = ""
                 if let s = b["content"] as? String { text = s }
                 else if let arr = b["content"] as? [[String: Any]] { text = arr.compactMap { $0["text"] as? String }.joined(separator: " ") }
                 guard let r = text.range(of: "[0-9a-f]{16,17} \\(internal ID", options: .regularExpression) else { continue }
                 let aid = text[r].components(separatedBy: " ").first ?? ""
-                if let info = calls[useId], !aid.isEmpty { map[aid] = info }
+                if let info = calls[uid], !aid.isEmpty { map[aid] = info }
             }
         }
         return map
